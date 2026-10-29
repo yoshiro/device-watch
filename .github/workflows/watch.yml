@@ -1,0 +1,74 @@
+# 家の端末が「生きてます」の合図を出し続けているかを、30分ごとに外から確かめる。
+#
+# 合図: 各端末が10分ごとにリポジトリ変数 HEARTBEAT_<端末> を「<UNIX秒> <表示名>」で上書きする
+# 判定: 合図が STALE_MINUTES より古ければ「止まっている」を1回、新しくなったら「復旧した」を1回 LINE に送る
+# 記録: 送ったことはリポジトリ変数 ALERT_<端末> で覚える（あれば通知済み）。二重に送らないため
+#
+# Secrets（値はここに書かない）:
+#   WATCH_TOKEN                fine-grained PAT。このリポジトリの Variables: Read and write だけ
+#   LINE_CHANNEL_ACCESS_TOKEN  LINE Messaging API のチャネルアクセストークン
+#   LINE_TO                    送り先のグループ ID
+#
+# 公開リポジトリなので、通知の文面に個人の情報を書かない。
+name: watch
+
+on:
+  schedule:
+    # 毎時 0 分は混んで遅れやすいので外す
+    - cron: "11,41 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Check heartbeats
+        env:
+          GH_TOKEN: ${{ secrets.WATCH_TOKEN }}
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          REPO: ${{ github.repository }}
+          STALE_MINUTES: "30"
+        run: |
+          set -euo pipefail
+          export TZ=Asia/Tokyo
+          now=$(date +%s)
+
+          send_line() {
+            body=$(jq -n --arg to "$LINE_TO" --arg text "$1" '{to: $to, messages: [{type: "text", text: $text}]}')
+            code=$(curl -sS -o /tmp/line.out -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/push \
+              -H "Authorization: Bearer $LINE_TOKEN" -H 'Content-Type: application/json' -d "$body")
+            if [ "$code" != 200 ]; then echo "LINE への送信に失敗 HTTP $code: $(cat /tmp/line.out)"; return 1; fi
+          }
+
+          vars=$(gh api "repos/$REPO/actions/variables?per_page=100" --jq '.variables[] | [.name, .value] | @tsv')
+          heartbeats=$(printf '%s\n' "$vars" | awk -F'\t' '$1 ~ /^HEARTBEAT_/')
+          if [ -z "$heartbeats" ]; then echo "合図がまだ1つもありません"; exit 0; fi
+
+          while IFS=$'\t' read -r name value; do
+            device=${name#HEARTBEAT_}
+            beat=${value%% *}
+            label=${value#* }
+            [ "$label" = "$value" ] && label=$device
+            age_min=$(( (now - beat) / 60 ))
+            alerted=$(printf '%s\n' "$vars" | awk -F'\t' -v n="ALERT_$device" '$1 == n {print $2}')
+            last=$(date -d "@$beat" '+%-m/%-d %H:%M')
+            echo "$label: 最後の合図 $last（${age_min}分前）通知済み=${alerted:-なし}"
+
+            if [ "$age_min" -ge "$STALE_MINUTES" ] && [ -z "$alerted" ]; then
+              send_line "⚠️ ${label} が止まっているようです（最後の確認 ${last}）
+          朝・夕のお知らせや自動の連絡が届かないことがあります。復旧したらお知らせします。"
+              gh api -X POST "repos/$REPO/actions/variables" -f name="ALERT_$device" -f value="$now" >/dev/null
+            elif [ "$age_min" -lt "$STALE_MINUTES" ] && [ -n "$alerted" ]; then
+              down_min=$(( (now - alerted) / 60 + STALE_MINUTES ))
+              send_line "✅ ${label} が復旧しました（約${down_min}分止まっていました）"
+              gh api -X DELETE "repos/$REPO/actions/variables/ALERT_$device" >/dev/null
+            fi
+          done <<< "$heartbeats"
