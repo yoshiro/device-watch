@@ -25,7 +25,7 @@ gh api -X PUT repos/yoshiro/device-watch/actions/workflows/watch.yml/enable
 
 | 名前 | 中身 |
 |---|---|
-| `WATCH_TOKEN` | fine-grained PAT（このリポジトリだけ、Variables: Read and write） |
+| `WATCH_TOKEN` | fine-grained PAT（このリポジトリだけ、Variables: Read and write）。期限の2週間前から LINE で予告する |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API のチャネルアクセストークン |
 | `LINE_TO` | 送り先のグループ ID |
 

@@ -72,3 +72,21 @@ jobs:
               gh api -X DELETE "repos/$REPO/actions/variables/ALERT_$device" >/dev/null
             fi
           done <<< "$heartbeats"
+
+          # WATCH_TOKEN の期限が2週間を切ったら、3日に1回予告する（記録は ALERT_TOKEN）
+          exp=$(curl -sSI -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/rate_limit \
+            | sed -n 's/^github-authentication-token-expiration: *//Ip' | tr -d '\r')
+          if [ -n "$exp" ]; then
+            exp_s=$(date -d "$exp" +%s)
+            warned=$(printf '%s\n' "$vars" | awk -F'\t' '$1 == "ALERT_TOKEN" {print $2}')
+            echo "WATCH_TOKEN の期限: $(date -d "@$exp_s" '+%Y-%m-%d')"
+            if [ $(( exp_s - now )) -lt $(( 14 * 86400 )) ] && [ $(( now - ${warned:-0} )) -gt $(( 72 * 3600 )) ]; then
+              send_line "🔑 見張りの Actions 用トークンが $(date -d "@$exp_s" '+%-m/%-d') に切れます
+          作り直して Secrets の WATCH_TOKEN を差し替えてください。"
+              if [ -n "$warned" ]; then
+                gh api -X PATCH "repos/$REPO/actions/variables/ALERT_TOKEN" -f value="$now" >/dev/null
+              else
+                gh api -X POST "repos/$REPO/actions/variables" -f name=ALERT_TOKEN -f value="$now" >/dev/null
+              fi
+            fi
+          fi
